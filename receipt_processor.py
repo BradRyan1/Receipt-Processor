@@ -44,6 +44,10 @@ def init_aws_clients():
 def extract_text_from_image(textract_client, image_path: str) -> str:
     """Extract text from an image using Amazon Textract"""
     try:
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"File not found: {image_path}")
+        if not os.access(image_path, os.R_OK):
+            raise PermissionError(f"No read permission for file: {image_path}")
         with open(image_path, 'rb') as image_file:
             image_bytes = image_file.read()
         
@@ -53,9 +57,15 @@ def extract_text_from_image(textract_client, image_path: str) -> str:
         
         extracted_text = ' '.join([item['Text'] for item in response['Blocks'] if item['BlockType'] == 'LINE'])
         return extracted_text
+    except FileNotFoundError as fnf:
+        logger.error(str(fnf))
+        return f"ERROR: {str(fnf)}"
+    except PermissionError as pe:
+        logger.error(str(pe))
+        return f"ERROR: {str(pe)}"
     except Exception as e:
         logger.error(f"Error extracting text from {image_path}: {str(e)}")
-        return ""
+        return f"ERROR: {str(e)}"
 
 def classify_receipt(comprehend_client, text: str) -> str:
     """Classify receipt type using Amazon Comprehend"""
@@ -167,6 +177,17 @@ def process_receipt_file(textract_client, comprehend_client, file_path: str) -> 
         # Extract text from image
         extracted_text = extract_text_from_image(textract_client, file_path)
         
+        if extracted_text.startswith("ERROR:"):
+            return {
+                'file_path': file_path,
+                'classification': 'File Error',
+                'date': None,
+                'total': None,
+                'new_filename': None,
+                'extracted_text': extracted_text,
+                'error': extracted_text
+            }
+        
         if not extracted_text:
             return {
                 'file_path': file_path,
@@ -174,6 +195,7 @@ def process_receipt_file(textract_client, comprehend_client, file_path: str) -> 
                 'date': None,
                 'total': None,
                 'new_filename': None,
+                'extracted_text': '',
                 'error': 'No text extracted'
             }
         
@@ -269,25 +291,30 @@ def main():
     # Folder selection with browse button
     st.sidebar.subheader("📁 Folder Selection")
     
-    # Create two columns for folder selection
-    col1, col2 = st.sidebar.columns([3, 1])
+    # Initialize session state for folder_path if not set
+    if 'folder_path' not in st.session_state:
+        st.session_state['folder_path'] = ''
     
-    with col1:
-        folder_path = st.text_input(
-            "Folder path:",
-            placeholder="Select folder with receipt images",
-            key="folder_path"
-        )
+    # Handle Browse button
+    browse_clicked = st.sidebar.button("📂 Browse", help="Click to browse and select a folder")
+    if browse_clicked:
+        try:
+            selected_folder = select_folder()
+            if selected_folder:
+                st.session_state['folder_path'] = selected_folder
+                st.experimental_rerun()
+        except Exception as e:
+            st.sidebar.error(f"Error opening folder dialog: {str(e)}")
     
-    with col2:
-        if st.button("📂 Browse", help="Click to browse and select a folder"):
-            try:
-                selected_folder = select_folder()
-                if selected_folder:
-                    st.session_state.folder_path = selected_folder
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Error opening folder dialog: {str(e)}")
+    # Folder path input (value comes from session state)
+    folder_path = st.sidebar.text_input(
+        "Folder path:",
+        value=st.session_state['folder_path'],
+        placeholder="Select folder with receipt images"
+    )
+    # Keep session state in sync if user types manually
+    if folder_path != st.session_state['folder_path']:
+        st.session_state['folder_path'] = folder_path
     
     # File type filter
     st.sidebar.subheader("📄 File Types")
