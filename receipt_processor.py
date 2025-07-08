@@ -394,94 +394,155 @@ def main():
     show_extracted_text = st.sidebar.checkbox("Show extracted text", value=False)
     
     # Main content area
-    if folder_path and os.path.exists(folder_path):
-        st.success(f"✅ Folder found: {folder_path}")
-        
-        # Find image files
-        image_files = []
-        for ext in file_extensions:
-            image_files.extend(Path(folder_path).glob(f"*{ext}"))
-            image_files.extend(Path(folder_path).glob(f"*{ext.upper()}"))
-        
-        if not image_files:
-            st.warning(f"No image files found in {folder_path} with selected extensions.")
-            st.info("Supported formats: JPG, JPEG, PNG, TIFF, BMP, PDF")
-        else:
-            st.info(f"Found {len(image_files)} image files to process.")
+    if folder_path:
+        # Clean and normalize the path
+        try:
+            # Handle different path formats
+            if folder_path.startswith('"') and folder_path.endswith('"'):
+                folder_path = folder_path[1:-1]  # Remove quotes
             
-            # Show preview of files
-            with st.expander(f"📋 Preview Files ({len(image_files)} found)"):
-                file_list = [f.name for f in image_files[:10]]  # Show first 10 files
-                if len(image_files) > 10:
-                    file_list.append(f"... and {len(image_files) - 10} more files")
-                for file_name in file_list:
-                    st.write(f"• {file_name}")
+            # Normalize path separators
+            folder_path = os.path.normpath(folder_path)
             
-            # Check AWS status before allowing processing
-            if not textract_client or not comprehend_client:
-                st.error("❌ AWS services not available. Cannot process receipts.")
-                st.info("Please configure your AWS credentials using 'aws configure'")
-                st.info("See aws_setup_guide.md for detailed instructions.")
+            # Convert to absolute path if needed
+            if not os.path.isabs(folder_path):
+                folder_path = os.path.abspath(folder_path)
+            
+            # Check if path exists
+            if os.path.exists(folder_path):
+                st.success(f"✅ Folder found: {folder_path}")
+                
+                # Find image files
+                image_files = []
+                for ext in file_extensions:
+                    try:
+                        image_files.extend(Path(folder_path).glob(f"*{ext}"))
+                        image_files.extend(Path(folder_path).glob(f"*{ext.upper()}"))
+                    except Exception as e:
+                        st.warning(f"Error searching for {ext} files: {str(e)}")
+                
+                if not image_files:
+                    st.warning(f"No image files found in {folder_path} with selected extensions.")
+                    st.info("Supported formats: JPG, JPEG, PNG, TIFF, BMP, PDF")
+                    
+                    # Show what files are actually in the folder
+                    try:
+                        all_files = list(Path(folder_path).iterdir())
+                        if all_files:
+                            st.info("Files found in folder:")
+                            for file in all_files[:10]:  # Show first 10 files
+                                st.write(f"• {file.name}")
+                            if len(all_files) > 10:
+                                st.write(f"... and {len(all_files) - 10} more files")
+                    except Exception as e:
+                        st.error(f"Error listing folder contents: {str(e)}")
+                else:
+                    st.info(f"Found {len(image_files)} image files to process.")
+                    
+                    # Show preview of files
+                    with st.expander(f"📋 Preview Files ({len(image_files)} found)"):
+                        file_list = [f.name for f in image_files[:10]]  # Show first 10 files
+                        if len(image_files) > 10:
+                            file_list.append(f"... and {len(image_files) - 10} more files")
+                        for file_name in file_list:
+                            st.write(f"• {file_name}")
+                    
+                    # Check AWS status before allowing processing
+                    if not textract_client or not comprehend_client:
+                        st.error("❌ AWS services not available. Cannot process receipts.")
+                        st.info("Please configure your AWS credentials using 'aws configure'")
+                        st.info("See aws_setup_guide.md for detailed instructions.")
+                    else:
+                        # Process button
+                        if st.button("🚀 Process Receipts", type="primary"):
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
+                            
+                            results = []
+                            
+                            for i, file_path in enumerate(image_files):
+                                status_text.text(f"Processing {file_path.name}...")
+                                
+                                result = process_receipt_file(textract_client, comprehend_client, str(file_path))
+                                results.append(result)
+                                
+                                # Update progress
+                                progress_bar.progress((i + 1) / len(image_files))
+                            
+                            status_text.text("Processing complete!")
+                            
+                            # Store results in session state for later use
+                            st.session_state['processing_results'] = results
+                            
+                            # Display results
+                            st.header("📊 Processing Results")
+                            
+                            # Summary statistics
+                            classifications = [r['classification'] for r in results if r['classification'] != 'Error']
+                            if classifications:
+                                st.subheader("Receipt Classifications")
+                                classification_counts = {}
+                                for classification in classifications:
+                                    classification_counts[classification] = classification_counts.get(classification, 0) + 1
+                                
+                                for classification, count in classification_counts.items():
+                                    st.write(f"• {classification}: {count} receipts")
+                            
+                            # Detailed results table
+                            st.subheader("Detailed Results")
+                            
+                            # Prepare data for display
+                            display_data = []
+                            for result in results:
+                                display_data.append({
+                                    'File': Path(result['file_path']).name,
+                                    'Classification': result['classification'],
+                                    'Date': result['date'] or 'Not found',
+                                    'Total': f"${result['total']:.2f}" if result['total'] else 'Not found',
+                                    'New Filename': result['new_filename'] or 'Not generated',
+                                    'Status': '✅ Success' if not result['error'] else f"❌ {result['error']}"
+                                })
+                            
+                            st.dataframe(display_data, use_container_width=True)
+                            
+                            # Show extracted text if requested
+                            if show_extracted_text:
+                                st.subheader("Extracted Text Samples")
+                                for result in results:
+                                    if result['extracted_text'] and not result['error']:
+                                        with st.expander(f"Text from {Path(result['file_path']).name}"):
+                                            st.text(result['extracted_text'])
             else:
-                # Process button
-                if st.button("🚀 Process Receipts", type="primary"):
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    results = []
-                    
-                    for i, file_path in enumerate(image_files):
-                        status_text.text(f"Processing {file_path.name}...")
-                        
-                        result = process_receipt_file(textract_client, comprehend_client, str(file_path))
-                        results.append(result)
-                        
-                        # Update progress
-                        progress_bar.progress((i + 1) / len(image_files))
-                    
-                    status_text.text("Processing complete!")
-                    
-                    # Store results in session state for later use
-                    st.session_state['processing_results'] = results
-                    
-                    # Display results
-                    st.header("📊 Processing Results")
-                    
-                    # Summary statistics
-                    classifications = [r['classification'] for r in results if r['classification'] != 'Error']
-                    if classifications:
-                        st.subheader("Receipt Classifications")
-                        classification_counts = {}
-                        for classification in classifications:
-                            classification_counts[classification] = classification_counts.get(classification, 0) + 1
-                        
-                        for classification, count in classification_counts.items():
-                            st.write(f"• {classification}: {count} receipts")
-                    
-                    # Detailed results table
-                    st.subheader("Detailed Results")
-                    
-                    # Prepare data for display
-                    display_data = []
-                    for result in results:
-                        display_data.append({
-                            'File': Path(result['file_path']).name,
-                            'Classification': result['classification'],
-                            'Date': result['date'] or 'Not found',
-                            'Total': f"${result['total']:.2f}" if result['total'] else 'Not found',
-                            'New Filename': result['new_filename'] or 'Not generated',
-                            'Status': '✅ Success' if not result['error'] else f"❌ {result['error']}"
-                        })
-                    
-                    st.dataframe(display_data, use_container_width=True)
-                    
-                    # Show extracted text if requested
-                    if show_extracted_text:
-                        st.subheader("Extracted Text Samples")
-                        for result in results:
-                            if result['extracted_text'] and not result['error']:
-                                with st.expander(f"Text from {Path(result['file_path']).name}"):
-                                    st.text(result['extracted_text'])
+                st.error(f"❌ Folder not found: {folder_path}")
+                st.info("Please check the folder path and try again.")
+                
+                # Provide helpful debugging info
+                st.subheader("🔍 Debug Information")
+                st.write(f"**Path entered:** {folder_path}")
+                st.write(f"**Path exists:** {os.path.exists(folder_path)}")
+                st.write(f"**Is absolute:** {os.path.isabs(folder_path)}")
+                
+                # Check if parent directory exists
+                parent_dir = os.path.dirname(folder_path)
+                if os.path.exists(parent_dir):
+                    st.write(f"✅ Parent directory exists: {parent_dir}")
+                    try:
+                        parent_contents = os.listdir(parent_dir)
+                        st.write(f"**Contents of parent directory:**")
+                        for item in parent_contents[:10]:
+                            st.write(f"• {item}")
+                        if len(parent_contents) > 10:
+                            st.write(f"... and {len(parent_contents) - 10} more items")
+                    except Exception as e:
+                        st.error(f"Error listing parent directory: {str(e)}")
+                else:
+                    st.write(f"❌ Parent directory does not exist: {parent_dir}")
+                
+        except Exception as e:
+            st.error(f"❌ Error processing folder path: {str(e)}")
+            st.info("Please try entering the path manually or use the Browse button.")
+    else:
+        st.info("👈 Please select a folder using the Browse button or enter a folder path to get started.")
     
     # Show rename button if we have results
     if 'processing_results' in st.session_state and st.session_state['processing_results']:
@@ -548,12 +609,6 @@ def main():
                     st.error("❌ No files were renamed. Check the error messages above.")
         else:
             st.warning("No files can be renamed. Make sure files were processed successfully and have valid classifications, dates, and totals.")
-    
-    elif folder_path:
-        st.error(f"❌ Folder not found: {folder_path}")
-        st.info("Please enter a valid folder path or use the Browse button.")
-    else:
-        st.info("👈 Please select a folder using the Browse button or enter a folder path to get started.")
     
     # Footer
     st.markdown("---")
