@@ -118,12 +118,40 @@ def extract_date_and_total(text: str) -> Tuple[Optional[str], Optional[float]]:
         r'(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2}),?\s+(\d{2,4})',  # Month DD, YYYY
     ]
     
+    # Enhanced total patterns - look for various receipt total indicators
     total_patterns = [
+        # Primary total patterns
         r'total[:\s]*\$?(\d+\.?\d*)',
-        r'amount[:\s]*\$?(\d+\.?\d*)',
-        r'balance[:\s]*\$?(\d+\.?\d*)',
         r'grand\s+total[:\s]*\$?(\d+\.?\d*)',
+        r'amount[:\s]*\$?(\d+\.?\d*)',
+        r'value[:\s]*\$?(\d+\.?\d*)',
+        r'balance[:\s]*\$?(\d+\.?\d*)',
+        r'charge[:\s]*\$?(\d+\.?\d*)',
+        r'payment[:\s]*\$?(\d+\.?\d*)',
+        
+        # Subtotal patterns (often the final amount)
+        r'subtotal[:\s]*\$?(\d+\.?\d*)',
+        r'sub\s*total[:\s]*\$?(\d+\.?\d*)',
+        
+        # Common receipt phrases
+        r'amount\s+due[:\s]*\$?(\d+\.?\d*)',
+        r'total\s+due[:\s]*\$?(\d+\.?\d*)',
+        r'balance\s+due[:\s]*\$?(\d+\.?\d*)',
+        r'final\s+total[:\s]*\$?(\d+\.?\d*)',
+        r'final\s+amount[:\s]*\$?(\d+\.?\d*)',
+        
+        # Dollar amounts at end of lines (common in receipts)
         r'\$(\d+\.?\d*)\s*$',  # Dollar amount at end of line
+        r'\$(\d+\.?\d*)\s*\n',  # Dollar amount followed by newline
+        
+        # Amounts with currency symbols
+        r'[\$£€¥](\d+\.?\d*)',  # Various currency symbols
+        
+        # Amounts in parentheses (sometimes used for totals)
+        r'\([\$£€¥]?(\d+\.?\d*)\)',
+        
+        # Amounts with "USD" or "CAD" etc.
+        r'(\d+\.?\d*)\s*(USD|CAD|EUR|GBP)',
     ]
     
     # Extract date
@@ -158,16 +186,52 @@ def extract_date_and_total(text: str) -> Tuple[Optional[str], Optional[float]]:
             except (ValueError, IndexError):
                 continue
     
-    # Extract total
+    # Extract total with enhanced logic
     extracted_total = None
+    total_matches = []
+    
+    # First pass: collect all potential total matches
     for pattern in total_patterns:
-        match = re.search(pattern, text.lower())
-        if match:
+        matches = re.finditer(pattern, text.lower())
+        for match in matches:
             try:
-                extracted_total = float(match.group(1))
-                break
+                amount = float(match.group(1))
+                # Store match with pattern priority and position
+                priority = 0
+                if 'total' in pattern and 'grand' in pattern:
+                    priority = 10  # Highest priority for grand total
+                elif 'total' in pattern:
+                    priority = 9   # High priority for total
+                elif 'subtotal' in pattern:
+                    priority = 8   # Good priority for subtotal
+                elif 'amount' in pattern or 'value' in pattern:
+                    priority = 7   # Medium priority for amount/value
+                elif 'balance' in pattern or 'due' in pattern:
+                    priority = 6   # Medium priority for balance/due
+                else:
+                    priority = 5   # Lower priority for other patterns
+                
+                total_matches.append({
+                    'amount': amount,
+                    'priority': priority,
+                    'pattern': pattern,
+                    'position': match.start(),
+                    'match_text': match.group(0)
+                })
             except (ValueError, IndexError):
                 continue
+    
+    # Second pass: select the best total
+    if total_matches:
+        # Sort by priority (highest first), then by position (last in text first)
+        total_matches.sort(key=lambda x: (x['priority'], -x['position']), reverse=True)
+        
+        # Take the highest priority match
+        extracted_total = total_matches[0]['amount']
+        
+        # Log the selection for debugging
+        logger.info(f"Selected total: ${extracted_total} from pattern '{total_matches[0]['pattern']}' "
+                   f"at position {total_matches[0]['position']}")
     
     return extracted_date, extracted_total
 
@@ -302,7 +366,7 @@ def main():
             selected_folder = select_folder()
             if selected_folder:
                 st.session_state['folder_path'] = selected_folder
-                st.experimental_rerun()
+                st.rerun()
         except Exception as e:
             st.sidebar.error(f"Error opening folder dialog: {str(e)}")
     
@@ -377,6 +441,9 @@ def main():
                     
                     status_text.text("Processing complete!")
                     
+                    # Store results in session state for later use
+                    st.session_state['processing_results'] = results
+                    
                     # Display results
                     st.header("📊 Processing Results")
                     
@@ -415,30 +482,72 @@ def main():
                             if result['extracted_text'] and not result['error']:
                                 with st.expander(f"Text from {Path(result['file_path']).name}"):
                                     st.text(result['extracted_text'])
+    
+    # Show rename button if we have results
+    if 'processing_results' in st.session_state and st.session_state['processing_results']:
+        st.header("📝 File Renaming")
+        results = st.session_state['processing_results']
+        
+        # Count files that can be renamed
+        renameable_files = [r for r in results if r['new_filename'] and not r['error']]
+        
+        if renameable_files:
+            st.info(f"Found {len(renameable_files)} files that can be renamed.")
+            
+            # Show preview of what will be renamed
+            with st.expander("📋 Preview Renames"):
+                for result in renameable_files:
+                    old_name = Path(result['file_path']).name
+                    new_name = f"{result['new_filename']}{Path(result['file_path']).suffix}"
+                    st.write(f"• {old_name} → {new_name}")
+            
+            # Rename button
+            if st.button("📝 Rename Files", type="secondary"):
+                rename_progress = st.progress(0)
+                rename_status = st.empty()
+                
+                successful_renames = 0
+                failed_renames = []
+                
+                for i, result in enumerate(renameable_files):
+                    old_name = Path(result['file_path']).name
+                    rename_status.text(f"Renaming {old_name}...")
                     
-                    # Rename files if requested
-                    if auto_rename and st.button("📝 Rename Files"):
-                        rename_progress = st.progress(0)
-                        rename_status = st.empty()
-                        
-                        successful_renames = 0
-                        for i, result in enumerate(results):
-                            if result['new_filename'] and not result['error']:
-                                rename_status.text(f"Renaming {Path(result['file_path']).name}...")
-                                if rename_file(result['file_path'], result['new_filename']):
-                                    successful_renames += 1
-                            
-                            rename_progress.progress((i + 1) / len(results))
-                        
-                        rename_status.text(f"Renaming complete! {successful_renames} files renamed successfully.")
-                        st.success(f"✅ {successful_renames} files renamed successfully!")
-                        
-                        # Show new filenames
-                        if successful_renames > 0:
-                            st.subheader("Renamed Files")
-                            for result in results:
-                                if result['new_filename'] and not result['error']:
-                                    st.write(f"• {Path(result['file_path']).name} → {result['new_filename']}")
+                    try:
+                        if rename_file(result['file_path'], result['new_filename']):
+                            successful_renames += 1
+                            st.success(f"✅ Renamed: {old_name}")
+                        else:
+                            failed_renames.append(old_name)
+                            st.error(f"❌ Failed to rename: {old_name}")
+                    except Exception as e:
+                        failed_renames.append(old_name)
+                        st.error(f"❌ Error renaming {old_name}: {str(e)}")
+                    
+                    rename_progress.progress((i + 1) / len(renameable_files))
+                
+                rename_status.text(f"Renaming complete! {successful_renames} files renamed successfully.")
+                
+                if successful_renames > 0:
+                    st.success(f"✅ {successful_renames} files renamed successfully!")
+                    
+                    # Show summary
+                    st.subheader("📊 Rename Summary")
+                    st.write(f"**Successfully renamed:** {successful_renames} files")
+                    
+                    if failed_renames:
+                        st.write(f"**Failed to rename:** {len(failed_renames)} files")
+                        with st.expander("Failed files"):
+                            for failed_file in failed_renames:
+                                st.write(f"• {failed_file}")
+                    
+                    # Update session state with new file paths
+                    st.session_state['processing_results'] = results
+                    st.rerun()
+                else:
+                    st.error("❌ No files were renamed. Check the error messages above.")
+        else:
+            st.warning("No files can be renamed. Make sure files were processed successfully and have valid classifications, dates, and totals.")
     
     elif folder_path:
         st.error(f"❌ Folder not found: {folder_path}")
